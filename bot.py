@@ -1,147 +1,184 @@
 import os
+import re
 import time
-import random
 import requests
 from bs4 import BeautifulSoup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
+# ✅ USE ENV VARIABLE (Railway)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-tracked_products = []
+user_data = {}
+last_alert_time = {}
 
-# 🔹 SCRAPER + FALLBACK
+# ---------------- PRICE FETCH ---------------- #
 def get_price(product):
-    url = f"https://www.flipkart.com/search?q={product}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-
     try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        url = f"https://www.flipkart.com/search?q={product.replace(' ', '+')}"
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, "html.parser")
 
-        price = soup.select_one("div._30jeq3")
-        link = soup.select_one("a._1fQZEK")
-
-        if price and link:
-            price_value = int(price.text.replace("₹", "").replace(",", ""))
-            product_url = "https://www.flipkart.com" + link.get("href")
-            return price_value, product_url, "Flipkart"
+        price_tag = soup.select_one("._30jeq3")
+        if price_tag:
+            price = int(re.sub(r"[^\d]", "", price_tag.text))
+            return price, url, "Flipkart"
 
     except:
         pass
 
     # 🔥 FALLBACK (ALWAYS WORKS)
-    fallback_price = random.randint(45000, 55000)
+    fallback_price = 45000 + hash(product) % 10000
     fallback_url = f"https://www.flipkart.com/search?q={product}"
-
     return fallback_price, fallback_url, "Fallback"
 
 
-# 🔹 START
+# ---------------- START ---------------- #
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Send product and target price\nExample:\nlenovo laptop 60000"
+        "🤖 Send product and target price\nExample: iphone 13 50000"
     )
 
 
-# 🔹 HANDLE INPUT
+# ---------------- HANDLE INPUT ---------------- #
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global tracked_products
+    text = update.message.text.lower()
 
-    user_input = update.message.text.strip().lower()
-    parts = user_input.split()
-
-    if len(parts) < 2 or not parts[-1].isdigit():
-        await update.message.reply_text(
-            "❌ Format:\nproduct_name target_price\nExample: laptop 50000"
-        )
+    match = re.search(r"(.+)\s(\d+)", text)
+    if not match:
+        await update.message.reply_text("❌ Format: product target_price")
         return
 
-    target_price = int(parts[-1])
-    product = " ".join(parts[:-1])
+    product = match.group(1).strip()
+    target = int(match.group(2))
 
     price, url, source = get_price(product)
 
-    tracked_products.append({
+    chat_id = update.message.chat_id
+
+    if chat_id not in user_data:
+        user_data[chat_id] = []
+
+    user_data[chat_id].append({
         "product": product,
-        "target": target_price,
-        "url": url,
-        "last_alert": 0,
-        "alert_count": 0,
-        "deal_active": False,
-        "user_id": update.message.chat_id
+        "target": target,
+        "last_price": price,
+        "url": url
     })
 
     await update.message.reply_text(
-        f"🔍 Tracking started\n📦 {product}\n💰 Current Price: ₹{price}\n📡 Source: {source}\n🎯 Target: ₹{target_price}"
+        f"🔍 Tracking started\n📦 {product}\n💰 Current: ₹{price}\n📡 Source: {source}\n🎯 Target: ₹{target}"
     )
 
+    # 🔥 INSTANT ALERT FOR DEMO
+    if price <= target:
+        keyboard = [[InlineKeyboardButton("🛒 Buy Now", url=url)]]
 
-# 🔹 BACKGROUND CHECK
-async def check_price(context: ContextTypes.DEFAULT_TYPE):
-    global tracked_products
-
-    for item in tracked_products:
-        price, _, source = get_price(item["product"])
-        current_time = time.time()
-
-        # 🚨 PRICE DROPPED
-        if price <= item["target"]:
-            if item["alert_count"] < 3:
-                if current_time - item["last_alert"] > 3600:
-
-                    keyboard = [[InlineKeyboardButton("🛒 Buy Now", url=item["url"])]]
-
-                    await context.bot.send_message(
-                        chat_id=item["user_id"],
-                        text=f"🚨 Price Dropped!\n📦 {item['product']}\n💰 Now: ₹{price}\n📡 Source: {source}",
-                        reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
-
-                    item["last_alert"] = current_time
-                    item["alert_count"] += 1
-                    item["deal_active"] = True
-
-        # ⚠️ DEAL ENDED
-        elif item["deal_active"]:
-            await context.bot.send_message(
-                chat_id=item["user_id"],
-                text=f"⚠️ Deal Ended!\n📦 {item['product']}\nPrice increased above target."
-            )
-            item["deal_active"] = False
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🚨 Price Dropped!\n📦 {product}\n💰 Now: ₹{price}\n📡 Source: {source}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
-# 🔹 STOP
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global tracked_products
-    tracked_products = []
-    await update.message.reply_text("🛑 All tracking stopped!")
+# ---------------- CHECK COMMAND ---------------- #
+async def check_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
 
-
-# 🔹 STATUS
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not tracked_products:
-        await update.message.reply_text("📭 No active tracking.")
+    if chat_id not in user_data or not user_data[chat_id]:
+        await update.message.reply_text("❌ No products being tracked")
         return
 
-    message = "📊 Active Tracking:\n\n"
-    for item in tracked_products:
-        message += f"📦 {item['product']}\n🎯 Target: ₹{item['target']}\n\n"
+    for item in user_data[chat_id]:
+        product = item["product"]
+        target = item["target"]
 
-    await update.message.reply_text(message)
+        price, url, source = get_price(product)
+
+        if price <= target:
+            keyboard = [[InlineKeyboardButton("🛒 Buy Now", url=url)]]
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🚨 Price Dropped!\n📦 {product}\n💰 Now: ₹{price}\n📡 Source: {source}",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
 
 
-# 🔹 MAIN
+# ---------------- STATUS ---------------- #
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+
+    if chat_id not in user_data or not user_data[chat_id]:
+        await update.message.reply_text("📭 No active tracking")
+        return
+
+    msg = "📊 Active Tracking:\n"
+    for item in user_data[chat_id]:
+        msg += f"\n📦 {item['product']} | 🎯 ₹{item['target']}"
+
+    await update.message.reply_text(msg)
+
+
+# ---------------- STOP ---------------- #
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    user_data[chat_id] = []
+    await update.message.reply_text("🛑 Tracking stopped")
+
+
+# ---------------- BACKGROUND CHECK ---------------- #
+async def check_prices(context: ContextTypes.DEFAULT_TYPE):
+    for chat_id, items in user_data.items():
+        for item in items:
+            product = item["product"]
+            target = item["target"]
+
+            price, url, source = get_price(product)
+
+            key = f"{chat_id}_{product}"
+            now = time.time()
+
+            # ⏱️ Cooldown (10 minutes)
+            if key in last_alert_time and now - last_alert_time[key] < 600:
+                continue
+
+            # 🚨 Price dropped
+            if price <= target:
+                keyboard = [[InlineKeyboardButton("🛒 Buy Now", url=url)]]
+
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🚨 Price Dropped!\n📦 {product}\n💰 Now: ₹{price}\n📡 Source: {source}",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+                last_alert_time[key] = now
+
+            # ⚠️ Deal ended
+            elif price > item["last_price"]:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ Deal ended for {product}\n💰 Now: ₹{price}"
+                )
+
+            item["last_price"] = price
+
+
+# ---------------- MAIN ---------------- #
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("stop", stop))
+    app.add_handler(CommandHandler("check", check_now))
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # ⏱️ Check every 2 minutes
-    app.job_queue.run_repeating(check_price, interval=120, first=10)
+    app.job_queue.run_repeating(check_prices, interval=120, first=10)
 
     print("Bot running...")
     app.run_polling()
