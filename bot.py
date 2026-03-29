@@ -11,19 +11,26 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 user_data = {}
 last_alert_time = {}
 
-# ---------------- PRICE FETCH (FINAL FIXED) ---------------- #
+# ---------------- PRICE FETCH (FINAL FIXED + ANTI BLOCK) ---------------- #
 def get_price(product):
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept-Language": "en-US,en;q=0.9"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Connection": "keep-alive"
         }
 
         search_url = f"https://www.flipkart.com/search?q={product.replace(' ', '+')}"
         res = requests.get(search_url, headers=headers, timeout=10)
+
+        # 🚨 BLOCK DETECTION
+        if "captcha" in res.text.lower():
+            raise Exception("Blocked by Flipkart")
+
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # -------- LAYOUT 1 (BIG CARDS) -------- #
+        # -------- LAYOUT 1 -------- #
         items = soup.select("a._1fQZEK")
 
         for item in items[:5]:
@@ -35,7 +42,7 @@ def get_price(product):
                     link = "https://www.flipkart.com" + item.get("href")
                     return price, link, "Flipkart"
 
-        # -------- LAYOUT 2 (GRID - IMPORTANT) -------- #
+        # -------- LAYOUT 2 -------- #
         grid_items = soup.select("div._4ddWXP")
 
         for item in grid_items[:8]:
@@ -50,7 +57,7 @@ def get_price(product):
                     link = "https://www.flipkart.com" + title_tag.get("href")
                     return price, link, "Flipkart"
 
-        # -------- FALLBACK TO FIRST GRID ITEM -------- #
+        # -------- FIRST ITEM FALLBACK -------- #
         if grid_items:
             item = grid_items[0]
             title_tag = item.select_one("a.s1Q9rs") or item.select_one("a.IRpwTa")
@@ -66,7 +73,7 @@ def get_price(product):
 
     # -------- FINAL FALLBACK -------- #
     fallback_url = f"https://www.flipkart.com/search?q={product.replace(' ', '+')}"
-    fallback_price = 999  # safe demo value
+    fallback_price = 999
     return fallback_price, fallback_url, "Fallback"
 
 
@@ -106,7 +113,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔍 Tracking started\n📦 {product}\n💰 Current: ₹{price}\n📡 Source: {source}\n🎯 Target: ₹{target}"
     )
 
-    # -------- INSTANT ALERT -------- #
     keyboard = [[InlineKeyboardButton("🛒 Buy Now", url=url)]]
 
     if price <= target:
@@ -175,7 +181,6 @@ async def check_prices(context: ContextTypes.DEFAULT_TYPE):
             key = f"{chat_id}_{product}"
             now = time.time()
 
-            # -------- COOLDOWN -------- #
             if key in last_alert_time and now - last_alert_time[key] < 600:
                 continue
 
@@ -209,7 +214,6 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Runs every 2 minutes
     app.job_queue.run_repeating(check_prices, interval=120, first=10)
 
     print("Bot running...")
